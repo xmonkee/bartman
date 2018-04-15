@@ -4,6 +4,7 @@ import signal
 import smbus
 import sys
 import time
+import threading
 import urllib2
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
@@ -16,22 +17,38 @@ URL = 'http://api.bart.gov/api/etd.aspx?cmd=etd&orig={}&key=MW9S-E7SL-26DU-VV8V&
 
 display = SevenSegment.SevenSegment()
 display.begin()
-logger = logging.getLogger("Bart Log")
+DEFAULT_VAL = '8888'
+VAL = [DEFAULT_VAL]
+LOCK = threading.Lock()
+STOP_EVENT = threading.Event()
 
 
 def init_logger():
-    logger.setLevel(logging.INFO)
     handler = RotatingFileHandler('bart.log', maxBytes=10000, backupCount=0)
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
     handler.setFormatter(formatter)
+    logger = logging.getLogger("Bart Log")
+    logger.setLevel(logging.INFO)
     logger.addHandler(handler)
+    return logger
+
+
+logger = init_logger()
 
 
 def signal_handler(signal, frame):
-    print('You pressed Ctrl+C!')
+    STOP_EVENT.set()
     display.clear()
     display.write_display()
     sys.exit(0)
+
+
+def pad_zero(n):
+    if len(n) == 2:
+        return n
+    if len(n) == 1:
+        return '0' + n
+    raise Exception('Received a value with too many digits')
 
 
 def get_etds(origin, destinations):
@@ -85,7 +102,12 @@ def try_to_get_val():
         return get_val()
     except Exception as e:
         logger.exception(e)
-        return 88.88
+        return DEFAULT_VAL
+
+
+def set_val():
+    with LOCK:
+        VAL[0] = try_to_get_val()
 
 
 def display_val(val, colon):
@@ -103,17 +125,21 @@ def try_to_display(val, colon):
         logger.exception(e)
 
 
+def update_etd():
+    while True:
+        set_val()
+        for i in xrange(10):
+            if STOP_EVENT.is_set():
+                return
+            time.sleep(1)
+
+
+THREAD = threading.Thread(target=update_etd).start()
+
+
 def show_etd():
-    val = try_to_get_val()
-    try_to_display(val, False)
-
-
-def pad_zero(n):
-    if len(n) == 2:
-        return n
-    if len(n) == 1:
-        return '0' + n
-    raise Exception('Received a value with too many digits')
+    with LOCK:
+        try_to_display(VAL[0], False)
 
 
 def show_time():
@@ -125,7 +151,8 @@ def show_time():
 
 if __name__ == '__main__':
     signal.signal(signal.SIGINT, signal_handler)
-    init_logger()
+    signal.signal(signal.SIGTERM, signal_handler)
+    threading.Thread(target=update_etd).start()
     is_show_time = False
     while True:
         if is_show_time: show_time()
